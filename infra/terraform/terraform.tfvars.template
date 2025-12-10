@@ -1,0 +1,29 @@
+# Terraform Variables Template
+# Copy this file to terraform.tfvars and fill in your values
+# DO NOT commit terraform.tfvars to version control!
+
+# Hetzner Cloud API Token
+# Get from: https://console.hetzner.cloud/projects/YOUR_PROJECT/security/tokens
+hcloud_token = "your-hetzner-api-token"
+
+# Azure Subscription ID
+# Get from: Azure Portal -> Subscriptions
+azure_subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Azure region (eastus, westeurope, etc.)
+azure_location = "eastus"
+
+# Hetzner datacenter (nbg1, fsn1, hel1)
+hetzner_location = "nbg1"
+
+# SSH public key for server access
+# Generate with: ssh-keygen -t ed25519 -C "fasttrack"
+ssh_public_key = "ssh-ed25519 AAAA... your-key"
+
+# Domain name (optional, leave empty if not using)
+domain_name = ""
+
+# Webhook secret (minimum 16 characters)
+# Generate with: openssl rand -hex 32
+webhook_secret = "change-this-to-a-secure-random-string-at-least-16-chars"
+
