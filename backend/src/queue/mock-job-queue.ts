@@ -1,13 +1,21 @@
 import type { JobQueueInterface, JobQueueConfig } from './job-queue.interface.js';
+import type { AIProcessorInterface } from '../processors/ai-processor.interface.js';
 
 /**
  * Mock Job Queue Implementation
  * 
- * Uses setTimeout to simulate async job processing.
- * After the delay, calls the webhook endpoint to report completion.
+ * Simulates the async job processing flow:
+ * 
+ * ┌──────────┐    ┌───────────┐    ┌──────────────┐    ┌─────────┐
+ * │  Client  │───▶│   Queue   │───▶│ AI Processor │───▶│ Webhook │
+ * │ (submit) │    │  (async)  │    │ (5s process) │    │(complete)│
+ * └──────────┘    └───────────┘    └──────────────┘    └─────────┘
+ * 
+ * The delay/processing time is controlled by the AIProcessor, not the queue.
+ * This allows different processors to have different latencies.
  * 
  * IMPORTANT LIMITATION (Trade-off of Mock approach):
- * If the backend restarts during the 5-second wait, pending jobs will be lost.
+ * If the backend restarts during processing, pending jobs will be lost.
  * This is acceptable for development/demo purposes.
  * 
  * TODO: For production, implement BullMQJobQueue with Redis persistence:
@@ -17,41 +25,58 @@ import type { JobQueueInterface, JobQueueConfig } from './job-queue.interface.js
  * - Job progress tracking
  */
 export class MockJobQueue implements JobQueueInterface {
-  private pendingTimers: Map<string, NodeJS.Timeout> = new Map();
+  private pendingJobs: Set<string> = new Set();
   private config: JobQueueConfig;
+  private aiProcessor: AIProcessorInterface;
 
-  constructor(config: JobQueueConfig) {
+  constructor(config: JobQueueConfig, aiProcessor: AIProcessorInterface) {
     this.config = config;
+    this.aiProcessor = aiProcessor;
     console.log('🔧 MockJobQueue initialized (in-memory, non-persistent)');
   }
 
   /**
    * Enqueues a job for processing.
-   * Sets a timer that will call the webhook after processingDelayMs.
+   * 
+   * Flow:
+   * 1. Job enters queue (this method)
+   * 2. Immediately starts async processing (non-blocking)
+   * 3. AIProcessor handles the job (includes any delays/API calls)
+   * 4. POST result to webhook callback
    */
   async enqueue(jobId: string): Promise<void> {
-    console.log(`📥 Job ${jobId} enqueued, processing in ${this.config.processingDelayMs}ms`);
+    console.log(`📥 Job ${jobId} enqueued, starting async processing...`);
+    
+    this.pendingJobs.add(jobId);
 
-    const timer = setTimeout(async () => {
-      await this.processJob(jobId);
-      this.pendingTimers.delete(jobId);
-    }, this.config.processingDelayMs);
-
-    this.pendingTimers.set(jobId, timer);
+    // Process asynchronously (don't await - return immediately to client)
+    this.processJob(jobId).finally(() => {
+      this.pendingJobs.delete(jobId);
+    });
   }
 
   /**
-   * Processes a job by calling the webhook callback.
-   * Simulates AI response generation.
+   * Processes a job:
+   * 1. Fetches the prompt
+   * 2. Calls AIProcessor
+   * 3. Reports result via webhook
    */
   private async processJob(jobId: string): Promise<void> {
     console.log(`⚙️ Processing job ${jobId}...`);
 
     try {
-      // Simulate AI response (in real implementation, this would call Azure OpenAI)
-      const mockResult = this.generateMockResponse(jobId);
-      
-      // Call the webhook to report completion
+      // Step 1: Fetch the prompt from database
+      const prompt = await this.config.promptFetcher(jobId);
+      if (!prompt) {
+        throw new Error(`Job ${jobId} not found or has no prompt`);
+      }
+
+      // Step 2: Call AI Processor (this is the EXTENSION POINT)
+      // Replace MockAIProcessor with real implementation for production
+      console.log(`🤖 Calling AI Processor for job ${jobId}...`);
+      const aiResult = await this.aiProcessor.process(jobId, prompt);
+
+      // Step 3: Report completion via webhook
       const response = await fetch(this.config.webhookCallbackUrl, {
         method: 'POST',
         headers: {
@@ -60,14 +85,15 @@ export class MockJobQueue implements JobQueueInterface {
         },
         body: JSON.stringify({
           jobId,
-          result: mockResult,
+          result: aiResult.result,
+          metadata: aiResult.metadata,
         }),
       });
 
       if (!response.ok) {
         console.error(`❌ Webhook callback failed for job ${jobId}: ${response.status}`);
       } else {
-        console.log(`✅ Job ${jobId} completed successfully`);
+        console.log(`✅ Job ${jobId} completed (${aiResult.metadata.processingTimeMs}ms, ${aiResult.metadata.totalTokens} tokens)`);
       }
     } catch (error) {
       console.error(`❌ Error processing job ${jobId}:`, error);
@@ -92,35 +118,16 @@ export class MockJobQueue implements JobQueueInterface {
   }
 
   /**
-   * Generates a mock AI response.
-   * In production, this would be replaced by actual Azure OpenAI API call.
-   */
-  private generateMockResponse(jobId: string): string {
-    const responses = [
-      'Based on my analysis, here are the key insights...',
-      'The data suggests multiple pathways forward. Consider these options...',
-      'After processing your request, I recommend the following approach...',
-      'Here is a comprehensive summary of the findings...',
-      'The analysis reveals several important patterns that warrant attention...',
-    ];
-    
-    const randomIndex = Math.floor(Math.random() * responses.length);
-    return `${responses[randomIndex]} [Mock response for job: ${jobId.slice(-6)}]`;
-  }
-
-  /**
-   * Gracefully shuts down the queue by canceling all pending timers.
-   * Called during application shutdown.
+   * Gracefully shuts down the queue.
+   * Note: In-flight jobs cannot be canceled, they will complete or fail.
    */
   async shutdown(): Promise<void> {
-    console.log(`🛑 Shutting down MockJobQueue (${this.pendingTimers.size} pending jobs will be lost)`);
+    console.log(`🛑 Shutting down MockJobQueue (${this.pendingJobs.size} jobs in progress)`);
     
-    for (const [jobId, timer] of this.pendingTimers) {
-      clearTimeout(timer);
-      console.log(`⚠️ Canceled pending job: ${jobId}`);
+    if (this.pendingJobs.size > 0) {
+      console.log(`⚠️ Jobs still processing: ${[...this.pendingJobs].join(', ')}`);
     }
     
-    this.pendingTimers.clear();
+    this.pendingJobs.clear();
   }
 }
-

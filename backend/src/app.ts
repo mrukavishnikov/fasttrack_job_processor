@@ -6,6 +6,7 @@ import { JobService } from './services/job.service.js';
 import { JobController } from './controllers/job.controller.js';
 import type { JobQueueInterface } from './queue/index.js';
 import { MockJobQueue } from './queue/index.js';
+import { MockAIProcessor } from './processors/index.js';
 import { createJobRoutes } from './routes/job.routes.js';
 import { createWebhookRoutes } from './routes/webhook.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
@@ -17,10 +18,17 @@ import { env } from './config/env.js';
  * Architecture Note: This file sets up dependency injection manually.
  * For larger applications, consider using a DI container like tsyringe or InversifyJS.
  * 
- * The container pattern makes it easy to:
- * - Swap implementations (MockJobQueue -> BullMQJobQueue)
- * - Mock dependencies for testing
- * - Manage lifecycle of services
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │                    DEPENDENCY INJECTION SETUP                          │
+ * │                                                                         │
+ * │  To integrate real AI, replace MockAIProcessor with:                   │
+ * │  • N8NProcessor        - n8n webhook integration                       │
+ * │  • AzureOpenAIProcessor - Azure OpenAI Service                         │
+ * │  • OpenAIProcessor     - Direct OpenAI API                             │
+ * │                                                                         │
+ * │  To scale the queue, replace MockJobQueue with:                        │
+ * │  • BullMQJobQueue      - Redis-backed queue with persistence           │
+ * └─────────────────────────────────────────────────────────────────────────┘
  */
 export interface AppContainer {
   app: Express;
@@ -45,19 +53,59 @@ export function createApp(): AppContainer {
     next();
   });
 
-  // Dependency Injection Setup
-  // Architecture Note: Replace MockJobQueue with BullMQJobQueue for production
-  const jobQueue = new MockJobQueue({
-    processingDelayMs: 5000, // 5 seconds as per spec
-    webhookCallbackUrl: `${env.BASE_URL}/webhook/callback`,
-    webhookSecret: env.WEBHOOK_SECRET,
+  // ═══════════════════════════════════════════════════════════════════════
+  // DEPENDENCY INJECTION SETUP
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // 1. Repository Layer (Data Access)
+  const jobRepository = new JobRepository();
+
+  // 2. AI Processor (EXTENSION POINT - replace for production)
+  // ┌─────────────────────────────────────────────────────────────────────┐
+  // │  REPLACE THIS to integrate real AI:                                 │
+  // │                                                                     │
+  // │  const aiProcessor = new N8NProcessor({                             │
+  // │    webhookUrl: 'https://n8n.example.com/webhook/process',           │
+  // │    apiKey: env.N8N_API_KEY,                                         │
+  // │  });                                                                │
+  // │                                                                     │
+  // │  OR:                                                                │
+  // │                                                                     │
+  // │  const aiProcessor = new AzureOpenAIProcessor({                     │
+  // │    endpoint: env.AZURE_OPENAI_ENDPOINT,                             │
+  // │    apiKey: env.AZURE_OPENAI_KEY,                                    │
+  // │    deploymentName: 'gpt-4',                                         │
+  // │  });                                                                │
+  // └─────────────────────────────────────────────────────────────────────┘
+  const aiProcessor = new MockAIProcessor({
+    baseDelayMs: 5000,    // 5 seconds base delay (per spec)
+    randomDelayMs: 1000,  // + 0-1s random variation
   });
 
-  const jobRepository = new JobRepository();
+  // 3. Job Queue (handles async processing flow)
+  const jobQueue = new MockJobQueue(
+    {
+      webhookCallbackUrl: `${env.BASE_URL}/webhook/callback`,
+      webhookSecret: env.WEBHOOK_SECRET,
+      // Callback to fetch job prompt from database
+      promptFetcher: async (jobId: string) => {
+        const job = await jobRepository.findById(jobId);
+        return job?.prompt ?? null;
+      },
+    },
+    aiProcessor
+  );
+
+  // 4. Service Layer (Business Logic)
   const jobService = new JobService(jobRepository, jobQueue);
+
+  // 5. Controller Layer (HTTP)
   const jobController = new JobController(jobService);
 
-  // Routes
+  // ═══════════════════════════════════════════════════════════════════════
+  // ROUTES
+  // ═══════════════════════════════════════════════════════════════════════
+
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
@@ -71,4 +119,3 @@ export function createApp(): AppContainer {
 
   return { app, jobQueue };
 }
-

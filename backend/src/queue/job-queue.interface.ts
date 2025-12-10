@@ -34,11 +34,11 @@ export interface JobQueueInterface {
  * Configuration for job processing.
  */
 export interface JobQueueConfig {
-  /** Delay in milliseconds before job processing starts */
-  processingDelayMs: number;
   /** URL to call when job processing completes */
   webhookCallbackUrl: string;
   /** Secret for webhook authentication */
   webhookSecret: string;
+  /** Function to fetch job prompt by ID (for AI processing) */
+  promptFetcher: (jobId: string) => Promise<string | null>;
 }
 
